@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Alert } from "react-native";
+import { Alert, Platform, PermissionsAndroid } from "react-native";
 import {
   RTCPeerConnection,
   RTCSessionDescription,
@@ -52,6 +52,60 @@ const ICE_SERVERS = {
     },
   ],
 };
+
+/*
+ * Request Android's runtime CAMERA/RECORD_AUDIO permissions before
+ * touching getUserMedia.
+ *
+ * Declaring these permissions in app.config.js / AndroidManifest.xml is
+ * necessary but not sufficient - react-native-webrtc does not itself
+ * trigger the system permission dialog the way a browser does.
+ * Without this explicit request, getUserMedia can fail (silently or
+ * with a native error) on a real device where the user hasn't already
+ * granted these permissions some other way.
+ *
+ * No-ops (returns true) on non-Android platforms, since this project
+ * targets Android and other platforms handle permission prompting
+ * differently.
+ */
+async function ensureCallPermissions(isVideo) {
+  if (Platform.OS !== "android") {
+    return true;
+  }
+
+  const permissionsToRequest = [
+    PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+  ];
+
+  if (isVideo) {
+    permissionsToRequest.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+  }
+
+  try {
+    const results = await PermissionsAndroid.requestMultiple(
+      permissionsToRequest
+    );
+
+    const allGranted = permissionsToRequest.every(
+      (permission) =>
+        results[permission] === PermissionsAndroid.RESULTS.GRANTED
+    );
+
+    if (!allGranted) {
+      console.warn(
+        "⚠️ Call permission(s) denied:",
+        permissionsToRequest.filter(
+          (p) => results[p] !== PermissionsAndroid.RESULTS.GRANTED
+        )
+      );
+    }
+
+    return allGranted;
+  } catch (error) {
+    console.error("❌ Permission request failed:", error?.message);
+    return false;
+  }
+}
 
 export const CallProvider = ({ children }) => {
   const { user } = useAuth();
@@ -263,8 +317,23 @@ export const CallProvider = ({ children }) => {
 
   /*
    * Get microphone/camera.
+   *
+   * Now requests Android's runtime CAMERA/RECORD_AUDIO permissions
+   * first - both startCall and acceptCall route through here, so this
+   * one change covers both call paths. If permission is denied, this
+   * throws, which is already caught by startCall's/acceptCall's
+   * existing try/catch blocks (same "Camera/microphone access is
+   * required" alert as before) - no other changes needed there.
    */
   const getMedia = async (isVideo) => {
+    const permissionsGranted = await ensureCallPermissions(isVideo);
+
+    if (!permissionsGranted) {
+      throw new Error(
+        "Microphone/camera permission was not granted."
+      );
+    }
+
     console.log(
       "🎙️ Requesting media:",
       isVideo ? "audio + video" : "audio"
@@ -527,6 +596,13 @@ export const CallProvider = ({ children }) => {
 
   /*
    * Subscribe to user's call topic.
+   *
+   * Unchanged from before - this already correctly guards against the
+   * unmount-before-subscribe-resolves race via the `cancelled` flag.
+   * It also no longer needs to know about reconnects: services/socket.js
+   * now automatically restores this subscription after any reconnect
+   * (network drop, or SocketContext's background/foreground cycle), so
+   * incoming calls keep working without this effect re-running.
    */
   useEffect(() => {
     if (!user?.userId) {
