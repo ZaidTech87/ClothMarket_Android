@@ -1,0 +1,24 @@
+node_modules/
+.expo/
+dist/
+web-build/
+
+# Environment - never commit real config values
+.env
+.env.local
+
+# Android / native build artifacts (regenerate via `expo prebuild`)
+android/app/build/
+android/.gradle/
+android/build/
+*.keystore
+!android/app/debug.keystore
+
+# OS / editor
+.DS_Store
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.vscode/
+.idea/
