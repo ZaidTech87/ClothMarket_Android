@@ -15,10 +15,17 @@ export const useSocket = () => {
 // connection per chat visit). Doing that in RN works too, but a single
 // app-wide connection tied to auth state is more battery/network
 // friendly on mobile, and gives us one place to implement the
-// foreground/background behavior the brief explicitly asks for:
-// disconnect when backgrounded, reconnect when foregrounded, on top of
-// stompjs's own reconnectDelay handling mid-session drops (Wi-Fi/data
-// switches).
+// foreground/background behavior: disconnect when backgrounded,
+// reconnect when foregrounded, on top of stompjs's own reconnectDelay
+// handling mid-session drops (Wi-Fi/data switches).
+//
+// This disconnect/reconnect cycle is now safe with respect to
+// ChatScreen's and CallContext's subscriptions: services/socket.js
+// keeps a registry of every subscribeTopic() destination and
+// automatically restores all of them on every successful (re)connect,
+// including the reconnect triggered here after backgrounding. Neither
+// ChatScreen nor CallContext need to know this provider ever
+// disconnected anything.
 export const SocketProvider = ({ children }) => {
   const { user } = useAuth();
   const appState = useRef(AppState.currentState);
@@ -34,7 +41,12 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
-      const wasBackground = appState.current.match(/inactive|background/);
+      // Defensive guard: AppState.currentState can be null/undefined on
+      // the very first change event on some platforms before the
+      // initial state is known - avoid calling .match on that.
+      const wasBackground = appState.current
+        ? appState.current.match(/inactive|background/)
+        : false;
       appState.current = nextState;
 
       if (!user) return;
