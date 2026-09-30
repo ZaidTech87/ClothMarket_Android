@@ -1,16 +1,15 @@
 import React from "react";
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import {
+  View,
+  ActivityIndicator,
+  StyleSheet,
+} from "react-native";
 import { NavigationContainer } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
 import AuthNavigator from "./AuthNavigator";
 import MainNavigator from "./MainNavigator";
 import { colors } from "../theme/theme";
 
-// Same decision the web app makes per-route with <ProtectedRoute>/
-// <PublicRoute>, just made once at the root: user present -> MainNavigator,
-// otherwise -> AuthNavigator. Simpler than porting per-route guards
-// because native-stack/tab navigators don't compose the same way
-// react-router's nested <Route> elements do.
 export default function RootNavigator() {
   const { user, loading } = useAuth();
 
@@ -22,13 +21,28 @@ export default function RootNavigator() {
     );
   }
 
+  const isLoggedIn = !!user;
+
+  console.log(
+    "🧭 RootNavigator:",
+    isLoggedIn ? "AUTHENTICATED" : "LOGGED OUT",
+    user?.userId ?? null
+  );
+
   return (
-    <NavigationContainer>
-      {user ? <MainNavigator /> : <AuthNavigator />}
+    <NavigationContainer
+      key={isLoggedIn ? "authenticated" : "unauthenticated"}
+    >
+      {isLoggedIn ? <MainNavigator /> : <AuthNavigator />}
     </NavigationContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.background },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.background,
+  },
 });

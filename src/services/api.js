@@ -11,8 +11,10 @@ export { API_BASE_URL, WS_BASE_URL };
 export const getMediaUrl = (url) => {
   if (!url) return "";
 
-  // Cloudinary / external URL
-  if (url.startsWith("http://") || url.startsWith("https://")) {
+  if (
+    url.startsWith("http://") ||
+    url.startsWith("https://")
+  ) {
     return url;
   }
 
@@ -42,7 +44,10 @@ let onUnauthorized = null;
 let handlingUnauthorized = false;
 
 export function setUnauthorizedHandler(handler) {
-  onUnauthorized = handler;
+  onUnauthorized =
+    typeof handler === "function"
+      ? handler
+      : null;
 }
 
 // =====================================================
@@ -73,17 +78,6 @@ api.interceptors.request.use(
 // =====================================================
 // RESPONSE INTERCEPTOR
 // =====================================================
-//
-// 401 = Unauthorized
-// 403 = Forbidden
-//
-// Your backend can return 403 when the JWT is expired/invalid.
-// Therefore we handle BOTH 401 and 403.
-//
-// IMPORTANT:
-// We don't logout when login/signup itself returns 401/403.
-// Otherwise a failed login attempt could trigger another logout.
-// =====================================================
 
 api.interceptors.response.use(
   (response) => response,
@@ -91,7 +85,14 @@ api.interceptors.response.use(
   async (error) => {
     const status = error?.response?.status;
 
-    const requestUrl = error?.config?.url || "";
+    const requestUrl =
+      error?.config?.url || "";
+
+    // ---------------------------------------------------
+    // AUTH ENDPOINTS
+    // ---------------------------------------------------
+    // Failed login/signup should NOT trigger logout.
+    // ---------------------------------------------------
 
     const isAuthRequest =
       requestUrl.includes("/auth/login") ||
@@ -99,27 +100,51 @@ api.interceptors.response.use(
       requestUrl.includes("/auth/forgot-password") ||
       requestUrl.includes("/auth/reset-password");
 
-    if ((status === 401 || status === 403) && !isAuthRequest) {
+    // ---------------------------------------------------
+    // 401 / 403 HANDLING
+    // ---------------------------------------------------
+
+    if (
+      (status === 401 || status === 403) &&
+      !isAuthRequest
+    ) {
       console.warn(
-        `🔐 Authentication failed (${status}). Clearing expired session...`
+        `🔐 Authentication failed (${status})`
       );
 
+      // Prevent multiple API requests from
+      // triggering logout simultaneously.
       if (!handlingUnauthorized) {
         handlingUnauthorized = true;
 
         try {
-          await clearSession();
-
           if (onUnauthorized) {
+            // AuthContext.logout() will:
+            // 1. set user to null
+            // 2. set token to null
+            // 3. clear SecureStore
             await onUnauthorized();
+          } else {
+            // Fallback if AuthProvider is not mounted.
+            await clearSession();
           }
         } catch (logoutError) {
           console.warn(
-            "⚠️ Error while clearing unauthorized session:",
+            "⚠️ Error while logging out:",
             logoutError?.message || logoutError
           );
+
+          // Safety fallback.
+          try {
+            await clearSession();
+          } catch (clearError) {
+            console.warn(
+              "⚠️ Failed to clear session:",
+              clearError?.message || clearError
+            );
+          }
         } finally {
-          // Allow future login/logout cycles to work normally.
+          // Allow future authentication cycles.
           setTimeout(() => {
             handlingUnauthorized = false;
           }, 500);
@@ -136,9 +161,11 @@ api.interceptors.response.use(
 // =====================================================
 
 export const authAPI = {
-  signup: (data) => api.post("/auth/signup", data),
+  signup: (data) =>
+    api.post("/auth/signup", data),
 
-  login: (data) => api.post("/auth/login", data),
+  login: (data) =>
+    api.post("/auth/login", data),
 
   forgotPassword: (mobile) =>
     api.post("/auth/forgot-password", {
@@ -167,13 +194,20 @@ export const userAPI = {
       },
     }),
 
-  updateProfileImage: (userId, fileAsset) => {
+  updateProfileImage: (
+    userId,
+    fileAsset
+  ) => {
     const formData = new FormData();
 
     formData.append("file", {
       uri: fileAsset.uri,
-      name: fileAsset.name || "profile.jpg",
-      type: fileAsset.type || "image/jpeg",
+      name:
+        fileAsset.name ||
+        "profile.jpg",
+      type:
+        fileAsset.type ||
+        "image/jpeg",
     });
 
     return api.post(
@@ -181,7 +215,8 @@ export const userAPI = {
       formData,
       {
         headers: {
-          "Content-Type": "multipart/form-data",
+          "Content-Type":
+            "multipart/form-data",
         },
       }
     );
@@ -193,7 +228,10 @@ export const userAPI = {
 // =====================================================
 
 export const postAPI = {
-  createPost: (postData, fileAsset) => {
+  createPost: (
+    postData,
+    fileAsset
+  ) => {
     const formData = new FormData();
 
     formData.append(
@@ -204,8 +242,12 @@ export const postAPI = {
     if (fileAsset) {
       formData.append("file", {
         uri: fileAsset.uri,
-        name: fileAsset.name || "post-media",
-        type: fileAsset.type || "application/octet-stream",
+        name:
+          fileAsset.name ||
+          "post-media",
+        type:
+          fileAsset.type ||
+          "application/octet-stream",
       });
     }
 
@@ -214,19 +256,25 @@ export const postAPI = {
       formData,
       {
         headers: {
-          "Content-Type": "multipart/form-data",
+          "Content-Type":
+            "multipart/form-data",
         },
       }
     );
   },
 
-  getFeed: (page = 0, size = 10) =>
+  getFeed: (
+    page = 0,
+    size = 10
+  ) =>
     api.get(
       `/posts/feed?page=${page}&size=${size}`
     ),
 
   getUserPosts: (userId) =>
-    api.get(`/posts/user/${userId}`),
+    api.get(
+      `/posts/user/${userId}`
+    ),
 
   getPost: (postId) =>
     api.get(`/posts/${postId}`),
@@ -240,7 +288,10 @@ export const postAPI = {
 // =====================================================
 
 export const messageAPI = {
-  sendTextMessage: (receiverId, message) =>
+  sendTextMessage: (
+    receiverId,
+    message
+  ) =>
     api.post(
       "/messages/send/text",
       null,
@@ -252,7 +303,10 @@ export const messageAPI = {
       }
     ),
 
-  sendVoiceMessage: (receiverId, voiceAsset) => {
+  sendVoiceMessage: (
+    receiverId,
+    voiceAsset
+  ) => {
     const formData = new FormData();
 
     formData.append(
@@ -262,8 +316,12 @@ export const messageAPI = {
 
     formData.append("file", {
       uri: voiceAsset.uri,
-      name: voiceAsset.name || "voice-message.webm",
-      type: voiceAsset.type || "audio/webm",
+      name:
+        voiceAsset.name ||
+        "voice-message.webm",
+      type:
+        voiceAsset.type ||
+        "audio/webm",
     });
 
     return api.post(
@@ -271,13 +329,16 @@ export const messageAPI = {
       formData,
       {
         headers: {
-          "Content-Type": "multipart/form-data",
+          "Content-Type":
+            "multipart/form-data",
         },
       }
     );
   },
 
-  getChatMessages: (otherUserId) =>
+  getChatMessages: (
+    otherUserId
+  ) =>
     api.get(
       "/messages/chat",
       {
@@ -288,13 +349,19 @@ export const messageAPI = {
     ),
 
   getChatUsers: (userId) =>
-    api.get(`/messages/chat-users/${userId}`),
+    api.get(
+      `/messages/chat-users/${userId}`
+    ),
 
   getInbox: (userId) =>
-    api.get(`/messages/inbox/${userId}`),
+    api.get(
+      `/messages/inbox/${userId}`
+    ),
 
   getUnreadCount: (userId) =>
-    api.get(`/messages/unread-count/${userId}`),
+    api.get(
+      `/messages/unread-count/${userId}`
+    ),
 
   markAsRead: (fromUserId) =>
     api.post(
@@ -313,11 +380,17 @@ export const messageAPI = {
 // =====================================================
 
 export const chatbotAPI = {
-  ask: (message, history) =>
-    api.post("/chatbot/ask", {
-      message,
-      history,
-    }),
+  ask: (
+    message,
+    history
+  ) =>
+    api.post(
+      "/chatbot/ask",
+      {
+        message,
+        history,
+      }
+    ),
 };
 
 // =====================================================

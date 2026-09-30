@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
   StyleSheet,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Alert,
 } from "react-native";
@@ -58,6 +59,9 @@ import {
   typography,
 } from "../../theme/theme";
 
+// Slow background refresh - only a safety net in case the STOMP
+// connection is down. Live delivery is still via the STOMP subscription.
+const POLL_INTERVAL_MS = 15000;
 
 export default function ChatScreen({ route, navigation }) {
   const { receiverId, userName } = route.params || {};
@@ -70,11 +74,7 @@ export default function ChatScreen({ route, navigation }) {
 
   const { subscribeTopic } = useSocket();
 
-  const {
-    startCall,
-    callStatus,
-  } = useCall();
-
+  const { startCall, callStatus } = useCall();
 
   // -----------------------------
   // STATE
@@ -82,24 +82,17 @@ export default function ChatScreen({ route, navigation }) {
 
   const [messages, setMessages] = useState([]);
 
-  const [receiverUser, setReceiverUser] =
-    useState(null);
+  const [receiverUser, setReceiverUser] = useState(null);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [loading, setLoading] = useState(true);
 
-  const [newMessage, setNewMessage] =
-    useState("");
+  const [newMessage, setNewMessage] = useState("");
 
-  const [sending, setSending] =
-    useState(false);
+  const [sending, setSending] = useState(false);
 
-  const [recording, setRecording] =
-    useState(false);
+  const [recording, setRecording] = useState(false);
 
-  const [playingId, setPlayingId] =
-    useState(null);
-
+  const [playingId, setPlayingId] = useState(null);
 
   // -----------------------------
   // REFS
@@ -111,126 +104,93 @@ export default function ChatScreen({ route, navigation }) {
 
   const mountedRef = useRef(true);
 
-
   // ==================================================
   // LOAD MESSAGES
   // ==================================================
 
-  const loadMessages = useCallback(
-    async () => {
-      if (!receiverId) {
+  const loadMessages = useCallback(async () => {
+    if (!receiverId) {
+      return;
+    }
+
+    try {
+      const response = await messageAPI.getChatMessages(receiverId);
+
+      if (!mountedRef.current) {
         return;
       }
 
-      try {
-        const response =
-          await messageAPI.getChatMessages(
-            receiverId
-          );
+      const incomingMessages = Array.isArray(response.data)
+        ? response.data
+        : [];
 
-        if (!mountedRef.current) {
-          return;
+      setMessages((previous) => {
+        const sameLength = previous.length === incomingMessages.length;
+
+        if (sameLength && previous.length > 0) {
+          const lastOld = previous[previous.length - 1];
+
+          const lastNew = incomingMessages[incomingMessages.length - 1];
+
+          if (String(lastOld?.id) === String(lastNew?.id)) {
+            return previous;
+          }
         }
 
-        const incomingMessages =
-          Array.isArray(response.data)
-            ? response.data
-            : [];
-
-        setMessages((previous) => {
-          const sameLength =
-            previous.length ===
-            incomingMessages.length;
-
-          if (
-            sameLength &&
-            previous.length > 0
-          ) {
-            const lastOld =
-              previous[
-                previous.length - 1
-              ];
-
-            const lastNew =
-              incomingMessages[
-                incomingMessages.length - 1
-              ];
-
-            if (
-              String(lastOld?.id) ===
-              String(lastNew?.id)
-            ) {
-              return previous;
-            }
-          }
-
-          return incomingMessages;
-        });
-      } catch (error) {
-        console.warn(
-          "Failed to load messages:",
-          error?.response?.data ||
-            error?.message
-        );
-      }
-    },
-    [receiverId]
-  );
-
+        return incomingMessages;
+      });
+    } catch (error) {
+      console.warn(
+        "Failed to load messages:",
+        error?.response?.data || error?.message
+      );
+    }
+  }, [receiverId]);
 
   // ==================================================
   // LOAD CHAT
   // ==================================================
 
-  const loadChat = useCallback(
-    async () => {
-      if (!receiverId) {
+  const loadChat = useCallback(async () => {
+    if (!receiverId) {
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const userResponse = await userAPI.getUser(receiverId);
+
+      if (!mountedRef.current) {
         return;
       }
 
-      setLoading(true);
+      setReceiverUser(userResponse.data);
 
+      await loadMessages();
+
+      // Marking as read is best-effort: if it fails, the conversation
+      // itself has still loaded fine, so don't show a load error.
       try {
-        const userResponse =
-          await userAPI.getUser(
-            receiverId
-          );
-
-        if (!mountedRef.current) {
-          return;
-        }
-
-        setReceiverUser(
-          userResponse.data
-        );
-
-        await loadMessages();
-
-        await messageAPI.markAsRead(
-          receiverId
-        );
-      } catch (error) {
-        console.warn(
-          "Failed to load chat:",
-          error?.response?.data ||
-            error?.message
-        );
-
-        if (mountedRef.current) {
-          Alert.alert(
-            "Chat Error",
-            "Unable to load this conversation."
-          );
-        }
-      } finally {
-        if (mountedRef.current) {
-          setLoading(false);
-        }
+        await messageAPI.markAsRead(receiverId);
+      } catch (markError) {
+        console.warn("markAsRead failed:", markError?.message);
       }
-    },
-    [receiverId, loadMessages]
-  );
+    } catch (error) {
+      console.warn(
+        "Failed to load chat:",
+        error?.response?.data || error?.message
+      );
 
+      if (mountedRef.current) {
+        Alert.alert("Chat Error", "Unable to load this conversation.");
+      }
+    } finally {
+      if (mountedRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [receiverId, loadMessages]);
 
   // ==================================================
   // SCREEN LIFECYCLE
@@ -245,9 +205,7 @@ export default function ChatScreen({ route, navigation }) {
       mountedRef.current = false;
 
       if (soundRef.current) {
-        soundRef.current
-          .unloadAsync()
-          .catch(() => {});
+        soundRef.current.unloadAsync().catch(() => {});
 
         soundRef.current = null;
       }
@@ -258,17 +216,40 @@ export default function ChatScreen({ route, navigation }) {
     };
   }, [loadChat]);
 
+  // ==================================================
+  // SAFETY POLL (slow fallback if STOMP is down)
+  // ==================================================
+
+  useEffect(() => {
+    if (!receiverId) {
+      return;
+    }
+
+    const intervalId = setInterval(loadMessages, POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [receiverId, loadMessages]);
+
+  // ==================================================
+  // KEEP LATEST MESSAGE VISIBLE WHEN KEYBOARD OPENS
+  // ==================================================
+
+  useEffect(() => {
+    const subscription = Keyboard.addListener("keyboardDidShow", () => {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({ animated: true });
+      });
+    });
+
+    return () => subscription.remove();
+  }, []);
 
   // ==================================================
   // REALTIME MESSAGE SUBSCRIPTION
   // ==================================================
 
   useEffect(() => {
-    if (
-      !user?.userId ||
-      !receiverId ||
-      !subscribeTopic
-    ) {
+    if (!user?.userId || !receiverId || !subscribeTopic) {
       return;
     }
 
@@ -276,123 +257,71 @@ export default function ChatScreen({ route, navigation }) {
 
     let cancelled = false;
 
-    const topic =
-      `/topic/messages/${user.userId}`;
+    const topic = `/topic/messages/${user.userId}`;
 
+    const setupSubscription = async () => {
+      try {
+        const removeSubscription = await subscribeTopic(
+          topic,
+          async (incoming) => {
+            if (cancelled || !incoming) {
+              return;
+            }
 
-    const setupSubscription =
-      async () => {
-        try {
-          const removeSubscription =
-            await subscribeTopic(
-              topic,
-              async (incoming) => {
-                if (
-                  cancelled ||
-                  !incoming
-                ) {
-                  return;
-                }
+            const senderId = incoming.senderId;
 
-                const senderId =
-                  incoming.senderId;
+            const incomingReceiverId = incoming.receiverId;
 
-                const incomingReceiverId =
-                  incoming.receiverId;
+            const belongsToConversation =
+              String(senderId) === String(receiverId) ||
+              String(incomingReceiverId) === String(receiverId);
 
+            if (!belongsToConversation) {
+              return;
+            }
 
-                const belongsToConversation =
-                  String(senderId) ===
-                    String(receiverId) ||
-                  String(
-                    incomingReceiverId
-                  ) ===
-                    String(receiverId);
+            setMessages((previous) => {
+              const incomingId = incoming.id;
 
-
-                if (
-                  !belongsToConversation
-                ) {
-                  return;
-                }
-
-
-                setMessages(
-                  (previous) => {
-                    const incomingId =
-                      incoming.id;
-
-                    if (
-                      incomingId !=
-                        null &&
-                      previous.some(
-                        (message) =>
-                          String(
-                            message.id
-                          ) ===
-                          String(
-                            incomingId
-                          )
-                      )
-                    ) {
-                      return previous;
-                    }
-
-                    return [
-                      ...previous,
-                      incoming,
-                    ];
-                  }
-                );
-
-
-                if (
-                  String(senderId) ===
-                  String(receiverId)
-                ) {
-                  try {
-                    await messageAPI.markAsRead(
-                      receiverId
-                    );
-                  } catch (error) {
-                    console.warn(
-                      "markAsRead failed:",
-                      error?.message
-                    );
-                  }
-                }
-
-
-                requestAnimationFrame(
-                  () => {
-                    listRef.current?.scrollToEnd(
-                      {
-                        animated: true,
-                      }
-                    );
-                  }
-                );
+              if (
+                incomingId != null &&
+                previous.some(
+                  (message) => String(message.id) === String(incomingId)
+                )
+              ) {
+                return previous;
               }
-            );
 
+              return [...previous, incoming];
+            });
 
-          if (!cancelled) {
-            unsubscribe =
-              removeSubscription;
-          } else {
-            removeSubscription?.();
+            if (String(senderId) === String(receiverId)) {
+              try {
+                await messageAPI.markAsRead(receiverId);
+              } catch (error) {
+                console.warn("markAsRead failed:", error?.message);
+              }
+            }
+
+            requestAnimationFrame(() => {
+              listRef.current?.scrollToEnd({
+                animated: true,
+              });
+            });
           }
-        } catch (error) {
-          console.warn(
-            "STOMP message subscription failed:",
-            error?.message
-          );
-        }
-      };
+        );
 
+        if (!cancelled) {
+          unsubscribe = removeSubscription;
+        } else {
+          removeSubscription?.();
+        }
+      } catch (error) {
+        console.warn("STOMP message subscription failed:", error?.message);
+      }
+    };
 
     setupSubscription();
-
 
     return () => {
       cancelled = true;
@@ -400,42 +329,26 @@ export default function ChatScreen({ route, navigation }) {
       try {
         unsubscribe?.();
       } catch (error) {
-        console.warn(
-          "Subscription cleanup failed:",
-          error?.message
-        );
+        console.warn("Subscription cleanup failed:", error?.message);
       }
     };
-  }, [
-    user?.userId,
-    receiverId,
-    subscribeTopic,
-  ]);
-
+  }, [user?.userId, receiverId, subscribeTopic]);
 
   // ==================================================
   // SEND TEXT MESSAGE
   // ==================================================
 
   const handleSend = async () => {
-    const text =
-      newMessage.trim();
+    const text = newMessage.trim();
 
-    if (
-      !text ||
-      sending ||
-      !receiverId
-    ) {
+    if (!text || sending || !receiverId) {
       return;
     }
 
     setSending(true);
 
     try {
-      await messageAPI.sendTextMessage(
-        receiverId,
-        text
-      );
+      await messageAPI.sendTextMessage(receiverId, text);
 
       setNewMessage("");
 
@@ -449,8 +362,7 @@ export default function ChatScreen({ route, navigation }) {
     } catch (error) {
       console.error(
         "Send message error:",
-        error?.response?.data ||
-          error?.message
+        error?.response?.data || error?.message
       );
 
       Alert.alert(
@@ -464,107 +376,84 @@ export default function ChatScreen({ route, navigation }) {
     }
   };
 
-
   // ==================================================
   // START VOICE RECORDING
   // ==================================================
 
-  const handleStartRecording =
-    async () => {
-      if (
-        sending ||
-        recording
-      ) {
-        return;
+  const handleStartRecording = async () => {
+    if (sending || recording) {
+      return;
+    }
+
+    const granted = await requestMicPermission();
+
+    if (!granted) {
+      Alert.alert(
+        "Permission required",
+        "Microphone permission is required to record a voice message."
+      );
+
+      return;
+    }
+
+    try {
+      await startVoiceRecording();
+
+      if (mountedRef.current) {
+        setRecording(true);
       }
+    } catch (error) {
+      console.error("Start recording error:", error?.message);
 
-      const granted =
-        await requestMicPermission();
-
-      if (!granted) {
-        Alert.alert(
-          "Permission required",
-          "Microphone permission is required to record a voice message."
-        );
-
-        return;
-      }
-
-      try {
-        await startVoiceRecording();
-
-        if (mountedRef.current) {
-          setRecording(true);
-        }
-      } catch (error) {
-        console.error(
-          "Start recording error:",
-          error?.message
-        );
-
-        Alert.alert(
-          "Recording failed",
-          "Could not start voice recording."
-        );
-      }
-    };
-
+      Alert.alert("Recording failed", "Could not start voice recording.");
+    }
+  };
 
   // ==================================================
   // STOP + SEND VOICE
   // ==================================================
 
-  const handleStopRecording =
-    async () => {
-      if (!recording) {
+  const handleStopRecording = async () => {
+    if (!recording) {
+      return;
+    }
+
+    try {
+      const asset = await stopVoiceRecording();
+
+      if (mountedRef.current) {
+        setRecording(false);
+      }
+
+      if (!asset) {
         return;
       }
 
-      try {
-        const asset =
-          await stopVoiceRecording();
+      setSending(true);
 
-        if (mountedRef.current) {
-          setRecording(false);
-        }
+      await messageAPI.sendVoiceMessage(receiverId, asset);
 
-        if (!asset) {
-          return;
-        }
+      await loadMessages();
 
-        setSending(true);
-
-        await messageAPI.sendVoiceMessage(
-          receiverId,
-          asset
-        );
-
-        await loadMessages();
-
-        requestAnimationFrame(() => {
-          listRef.current?.scrollToEnd({
-            animated: true,
-          });
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({
+          animated: true,
         });
-      } catch (error) {
-        console.error(
-          "Voice message error:",
-          error?.response?.data ||
-            error?.message
-        );
+      });
+    } catch (error) {
+      console.error(
+        "Voice message error:",
+        error?.response?.data || error?.message
+      );
 
-        Alert.alert(
-          "Voice message failed",
-          "Voice message send nahi hua."
-        );
-      } finally {
-        if (mountedRef.current) {
-          setSending(false);
-          setRecording(false);
-        }
+      Alert.alert("Voice message failed", "Voice message send nahi hua.");
+    } finally {
+      if (mountedRef.current) {
+        setSending(false);
+        setRecording(false);
       }
-    };
-
+    }
+  };
 
   // ==================================================
   // CANCEL RECORDING
@@ -574,119 +463,81 @@ export default function ChatScreen({ route, navigation }) {
     try {
       cancelVoiceRecording();
     } catch (error) {
-      console.warn(
-        "Cancel recording error:",
-        error?.message
-      );
+      console.warn("Cancel recording error:", error?.message);
     }
 
     setRecording(false);
   };
 
-
   // ==================================================
   // PLAY VOICE MESSAGE
   // ==================================================
 
-  const playVoice = async (
-    message
-  ) => {
+  const playVoice = async (message) => {
     try {
       if (!message?.voiceUrl) {
-        Alert.alert(
-          "Audio unavailable",
-          "Voice message file nahi mili."
-        );
+        Alert.alert("Audio unavailable", "Voice message file nahi mili.");
 
         return;
       }
 
       if (soundRef.current) {
-        await soundRef.current
-          .unloadAsync();
+        await soundRef.current.unloadAsync();
 
         soundRef.current = null;
       }
 
-      if (
-        playingId === message.id
-      ) {
+      if (playingId === message.id) {
         setPlayingId(null);
         return;
       }
 
-      const mediaUrl =
-        getMediaUrl(
-          message.voiceUrl
-        );
+      const mediaUrl = getMediaUrl(message.voiceUrl);
 
-      const { sound } =
-        await Audio.Sound.createAsync(
-          {
-            uri: mediaUrl,
-          },
-          {
-            shouldPlay: true,
-          }
-        );
+      const { sound } = await Audio.Sound.createAsync(
+        {
+          uri: mediaUrl,
+        },
+        {
+          shouldPlay: true,
+        }
+      );
 
       soundRef.current = sound;
 
       setPlayingId(message.id);
 
-      sound.setOnPlaybackStatusUpdate(
-        (status) => {
-          if (
-            status?.didJustFinish
-          ) {
-            setPlayingId(null);
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status?.didJustFinish) {
+          setPlayingId(null);
 
-            sound
-              .unloadAsync()
-              .catch(() => {});
+          sound.unloadAsync().catch(() => {});
 
-            soundRef.current = null;
-          }
+          soundRef.current = null;
         }
-      );
+      });
     } catch (error) {
-      console.error(
-        "Play voice error:",
-        error?.message
-      );
+      console.error("Play voice error:", error?.message);
 
       setPlayingId(null);
 
-      Alert.alert(
-        "Audio error",
-        "Voice message play nahi ho paya."
-      );
+      Alert.alert("Audio error", "Voice message play nahi ho paya.");
     }
   };
-
 
   // ==================================================
   // CALL
   // ==================================================
 
-  const receiverName =
-    receiverUser?.name ||
-    userName ||
-    "User";
+  const receiverName = receiverUser?.name || userName || "User";
 
-
-  const handleCall = async (
-    type
-  ) => {
+  const handleCall = async (type) => {
     if (!receiverId) {
       return;
     }
 
     if (callStatus !== "idle") {
-      Alert.alert(
-        "Call in progress",
-        "A call is already active."
-      );
+      Alert.alert("Call in progress", "A call is already active.");
 
       return;
     }
@@ -696,24 +547,16 @@ export default function ChatScreen({ route, navigation }) {
         {
           id: receiverId,
           name: receiverName,
-          profileImage:
-            receiverUser?.profileImage,
+          profileImage: receiverUser?.profileImage,
         },
         type
       );
     } catch (error) {
-      console.error(
-        "Call start error:",
-        error?.message
-      );
+      console.error("Call start error:", error?.message);
 
-      Alert.alert(
-        "Call failed",
-        "Unable to start the call."
-      );
+      Alert.alert("Call failed", "Unable to start the call.");
     }
   };
-
 
   // ==================================================
   // LOADING
@@ -722,20 +565,12 @@ export default function ChatScreen({ route, navigation }) {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator
-          size="large"
-          color={colors.accent}
-        />
+        <ActivityIndicator size="large" color={colors.accent} />
 
-        <Text
-          style={styles.loadingText}
-        >
-          Loading chat...
-        </Text>
+        <Text style={styles.loadingText}>Loading chat...</Text>
       </View>
     );
   }
-
 
   // ==================================================
   // UI
@@ -744,177 +579,95 @@ export default function ChatScreen({ route, navigation }) {
   return (
     <KeyboardAvoidingView
       style={styles.flex}
-      behavior={
-        Platform.OS === "ios"
-          ? "padding"
-          : "height"
-      }
-      keyboardVerticalOffset={
-        Platform.OS === "ios"
-          ? 90
-          : 0
-      }
+      // Android already resizes the window itself (adjustResize is set in
+      // the generated AndroidManifest), so adding a second adjustment via
+      // KeyboardAvoidingView on Android double-applies and can leave a gap
+      // above the keyboard. Only iOS needs "padding".
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
-
       {/* =========================================
           HEADER
           ========================================= */}
 
-      <SafeAreaView
-        style={styles.safeHeader}
-        edges={["top"]}
-      >
-        <View
-          style={styles.chatHeader}
-        >
-
+      <SafeAreaView style={styles.safeHeader} edges={["top"]}>
+        <View style={styles.chatHeader}>
           {/* BACK */}
 
           <TouchableOpacity
-            onPress={() =>
-              navigation.goBack()
-            }
+            onPress={() => navigation.goBack()}
             style={styles.backBtn}
             activeOpacity={0.7}
           >
-            <ArrowLeft
-              size={23}
-              color={
-                colors.textPrimary
-              }
-            />
+            <ArrowLeft size={23} color={colors.textPrimary} />
           </TouchableOpacity>
-
 
           {/* USER */}
 
           <TouchableOpacity
             style={styles.headerUser}
             onPress={() =>
-              navigation.push(
-                "UserProfile",
-                {
-                  userId: receiverId,
-                }
-              )
+              navigation.push("UserProfile", {
+                userId: receiverId,
+              })
             }
             activeOpacity={0.7}
           >
-
-            <View
-              style={
-                styles.headerAvatar
-              }
-            >
+            <View style={styles.headerAvatar}>
               {receiverUser?.profileImage ? (
                 <Image
                   source={{
-                    uri: getMediaUrl(
-                      receiverUser.profileImage
-                    ),
+                    uri: getMediaUrl(receiverUser.profileImage),
                   }}
-                  style={
-                    styles.headerAvatarImage
-                  }
+                  style={styles.headerAvatarImage}
                 />
               ) : (
-                <Text
-                  style={
-                    styles.headerAvatarPlaceholder
-                  }
-                >
-                  {receiverName
-                    ?.charAt(0)
-                    ?.toUpperCase() ||
-                    "U"}
+                <Text style={styles.headerAvatarPlaceholder}>
+                  {receiverName?.charAt(0)?.toUpperCase() || "U"}
                 </Text>
               )}
             </View>
 
-
-            <View
-              style={styles.headerInfo}
-            >
-              <Text
-                numberOfLines={1}
-                style={styles.headerName}
-              >
+            <View style={styles.headerInfo}>
+              <Text numberOfLines={1} style={styles.headerName}>
                 {receiverName}
               </Text>
 
               {receiverUser?.location ? (
-                <Text
-                  numberOfLines={1}
-                  style={
-                    styles.headerLocation
-                  }
-                >
-                  {
-                    receiverUser.location
-                  }
+                <Text numberOfLines={1} style={styles.headerLocation}>
+                  {receiverUser.location}
                 </Text>
               ) : (
-                <Text
-                  style={
-                    styles.onlineText
-                  }
-                >
-                  Chat
-                </Text>
+                <Text style={styles.onlineText}>Chat</Text>
               )}
             </View>
-
           </TouchableOpacity>
-
 
           {/* CALL BUTTONS */}
 
-          <View
-            style={
-              styles.headerActions
-            }
-          >
-
+          <View style={styles.headerActions}>
             {/* AUDIO */}
 
             <TouchableOpacity
-              style={
-                styles.callIconBtn
-              }
-              onPress={() =>
-                handleCall("audio")
-              }
+              style={styles.callIconBtn}
+              onPress={() => handleCall("audio")}
               activeOpacity={0.7}
             >
-              <Phone
-                size={20}
-                color={colors.accent}
-              />
+              <Phone size={20} color={colors.accent} />
             </TouchableOpacity>
-
 
             {/* VIDEO */}
 
             <TouchableOpacity
-              style={
-                styles.callIconBtn
-              }
-              onPress={() =>
-                handleCall("video")
-              }
+              style={styles.callIconBtn}
+              onPress={() => handleCall("video")}
               activeOpacity={0.7}
             >
-              <Video
-                size={20}
-                color={colors.accent}
-              />
+              <Video size={20} color={colors.accent} />
             </TouchableOpacity>
-
           </View>
-
         </View>
       </SafeAreaView>
-
 
       {/* =========================================
           MESSAGES
@@ -923,126 +676,66 @@ export default function ChatScreen({ route, navigation }) {
       <FlatList
         ref={listRef}
         style={styles.messagesArea}
-
         contentContainerStyle={[
           styles.messagesContent,
 
-          messages.length === 0 &&
-            styles.emptyMessagesContent,
+          messages.length === 0 && styles.emptyMessagesContent,
         ]}
-
         data={messages}
-
-        keyExtractor={(
-          item,
-          index
-        ) =>
-          item?.id != null
-            ? String(item.id)
-            : `message-${index}`
+        keyExtractor={(item, index) =>
+          item?.id != null ? String(item.id) : `message-${index}`
         }
-
         keyboardShouldPersistTaps="handled"
-
-        showsVerticalScrollIndicator={
-          false
-        }
-
+        showsVerticalScrollIndicator={false}
         onContentSizeChange={() => {
-          listRef.current?.scrollToEnd(
-            {
-              animated: false,
-            }
-          );
+          listRef.current?.scrollToEnd({
+            animated: false,
+          });
         }}
-
         ListEmptyComponent={
-          <View
-            style={
-              styles.emptyContainer
-            }
-          >
-            <Text
-              style={
-                styles.emptyTitle
-              }
-            >
-              No messages yet
-            </Text>
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyTitle}>No messages yet</Text>
 
-            <Text
-              style={
-                styles.emptyText
-              }
-            >
-              Start the conversation
-              {" "}
-              with {receiverName}.
+            <Text style={styles.emptyText}>
+              Start the conversation with {receiverName}.
             </Text>
           </View>
         }
-
         renderItem={({ item }) => {
+          const isMine = Number(item.senderId) === Number(user?.userId);
 
-          const isMine =
-            Number(item.senderId) ===
-            Number(user?.userId);
-
-          const isVoice =
-            item.messageType !==
-            "text";
-
+          const isVoice = item.messageType !== "text";
 
           return (
             <View
               style={[
                 styles.messageRow,
 
-                isMine
-                  ? styles.rowSent
-                  : styles.rowReceived,
+                isMine ? styles.rowSent : styles.rowReceived,
               ]}
             >
-
               <View
                 style={[
                   styles.bubble,
 
-                  isMine
-                    ? styles.bubbleSent
-                    : styles.bubbleReceived,
+                  isMine ? styles.bubbleSent : styles.bubbleReceived,
                 ]}
               >
-
                 {isVoice ? (
-
                   <TouchableOpacity
-                    onPress={() =>
-                      playVoice(item)
-                    }
-                    style={
-                      styles.voiceRow
-                    }
+                    onPress={() => playVoice(item)}
+                    style={styles.voiceRow}
                     activeOpacity={0.7}
                   >
-
                     <View
                       style={[
                         styles.voiceIcon,
 
-                        isMine &&
-                          styles.voiceIconSent,
+                        isMine && styles.voiceIconSent,
                       ]}
                     >
-                      <Text
-                        style={
-                          styles.voiceIconText
-                        }
-                      >
-                        {playingId ===
-                        item.id
-                          ? "Ⅱ"
-                          : "▶"}
+                      <Text style={styles.voiceIconText}>
+                        {playingId === item.id ? "Ⅱ" : "▶"}
                       </Text>
                     </View>
 
@@ -1050,33 +743,19 @@ export default function ChatScreen({ route, navigation }) {
                       style={[
                         styles.voiceText,
 
-                        isMine
-                          ? styles.textSent
-                          : styles.textReceived,
+                        isMine ? styles.textSent : styles.textReceived,
                       ]}
                     >
-                      {playingId ===
-                      item.id
-                        ? "Playing..."
-                        : "Voice message"}
+                      {playingId === item.id ? "Playing..." : "Voice message"}
                     </Text>
-
                   </TouchableOpacity>
-
                 ) : (
-
                   <Text
-                    style={
-                      isMine
-                        ? styles.textSent
-                        : styles.textReceived
-                    }
+                    style={isMine ? styles.textSent : styles.textReceived}
                   >
                     {item.message}
                   </Text>
-
                 )}
-
 
                 <Text
                   style={[
@@ -1087,81 +766,45 @@ export default function ChatScreen({ route, navigation }) {
                       : styles.messageTimeReceived,
                   ]}
                 >
-                  {formatMessageTime(
-                    item.createdAt
-                  )}
+                  {formatMessageTime(item.createdAt)}
                 </Text>
-
               </View>
-
             </View>
           );
         }}
       />
 
-
       {/* =========================================
           MESSAGE INPUT
           ========================================= */}
 
-      <View
-        style={styles.inputArea}
-      >
-
+      <View style={styles.inputArea}>
         <TextInput
           style={styles.textInput}
-
-          placeholder={
-            recording
-              ? "Recording voice..."
-              : "Type a message..."
-          }
-
-          placeholderTextColor={
-            colors.textSecondary
-          }
-
+          placeholder={recording ? "Recording voice..." : "Type a message..."}
+          placeholderTextColor={colors.textSecondary}
           value={newMessage}
-
-          onChangeText={
-            setNewMessage
-          }
-
-          editable={
-            !sending &&
-            !recording
-          }
-
+          onChangeText={setNewMessage}
+          editable={!sending && !recording}
           multiline
-
           maxLength={2000}
         />
 
-
         {!recording ? (
-
           <>
-
             {/* MIC */}
 
             <TouchableOpacity
               style={styles.iconBtn}
-              onPress={
-                handleStartRecording
-              }
+              onPress={handleStartRecording}
               disabled={sending}
               activeOpacity={0.7}
             >
               <Mic
                 size={21}
-                color={
-                  sending
-                    ? colors.textSecondary
-                    : colors.accent
-                }
+                color={sending ? colors.textSecondary : colors.accent}
               />
             </TouchableOpacity>
-
 
             {/* SEND */}
 
@@ -1169,147 +812,91 @@ export default function ChatScreen({ route, navigation }) {
               style={[
                 styles.sendBtn,
 
-                (!newMessage.trim() ||
-                  sending) &&
-                  styles.sendBtnDisabled,
+                (!newMessage.trim() || sending) && styles.sendBtnDisabled,
               ]}
-              onPress={
-                handleSend
-              }
-              disabled={
-                !newMessage.trim() ||
-                sending
-              }
+              onPress={handleSend}
+              disabled={!newMessage.trim() || sending}
               activeOpacity={0.8}
             >
               {sending ? (
-                <ActivityIndicator
-                  size="small"
-                  color={colors.white}
-                />
+                <ActivityIndicator size="small" color={colors.white} />
               ) : (
-                <Send
-                  size={18}
-                  color={colors.white}
-                />
+                <Send size={18} color={colors.white} />
               )}
             </TouchableOpacity>
-
           </>
-
         ) : (
-
           <>
-
             {/* CANCEL RECORDING */}
 
             <TouchableOpacity
-              style={
-                styles.cancelRecordBtn
-              }
-              onPress={
-                cancelRecording
-              }
+              style={styles.cancelRecordBtn}
+              onPress={cancelRecording}
               activeOpacity={0.7}
             >
-              <Text
-                style={
-                  styles.cancelRecordText
-                }
-              >
-                Cancel
-              </Text>
+              <Text style={styles.cancelRecordText}>Cancel</Text>
             </TouchableOpacity>
-
 
             {/* STOP RECORDING */}
 
             <TouchableOpacity
               style={styles.stopBtn}
-              onPress={
-                handleStopRecording
-              }
+              onPress={handleStopRecording}
               disabled={sending}
               activeOpacity={0.8}
             >
-
               {sending ? (
-                <ActivityIndicator
-                  size="small"
-                  color={colors.white}
-                />
+                <ActivityIndicator size="small" color={colors.white} />
               ) : (
-                <Square
-                  size={15}
-                  color={colors.white}
-                />
+                <Square size={15} color={colors.white} />
               )}
 
-              <Text
-                style={styles.stopText}
-              >
-                {sending
-                  ? "Sending"
-                  : "Stop"}
+              <Text style={styles.stopText}>
+                {sending ? "Sending" : "Stop"}
               </Text>
-
             </TouchableOpacity>
-
           </>
-
         )}
-
       </View>
-
     </KeyboardAvoidingView>
   );
 }
-
 
 // ======================================================
 // STYLES
 // ======================================================
 
 const styles = StyleSheet.create({
-
   flex: {
     flex: 1,
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
   },
-
 
   center: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
   },
-
 
   loadingText: {
     marginTop: spacing.sm,
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
     ...typography.caption,
   },
-
 
   // ==================================================
   // HEADER
   // ==================================================
 
   safeHeader: {
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
 
     // IMPORTANT:
     // Extra breathing room below
     // Android status bar.
     paddingTop: 8,
   },
-
 
   chatHeader: {
     minHeight: 68,
@@ -1324,15 +911,12 @@ const styles = StyleSheet.create({
 
     paddingVertical: 4,
 
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
 
     borderBottomWidth: 1,
 
-    borderBottomColor:
-      colors.border,
+    borderBottomColor: colors.border,
   },
-
 
   backBtn: {
     width: 44,
@@ -1341,7 +925,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-
 
   headerUser: {
     flex: 1,
@@ -1357,7 +940,6 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
 
-
   headerAvatar: {
     width: 40,
     height: 40,
@@ -1369,26 +951,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
 
-    backgroundColor:
-      colors.surface,
+    backgroundColor: colors.surface,
   },
-
 
   headerAvatarImage: {
     width: "100%",
     height: "100%",
   },
 
-
   headerAvatarPlaceholder: {
     fontSize: 16,
 
     fontWeight: "600",
 
-    color:
-      colors.textPrimary,
+    color: colors.textPrimary,
   },
-
 
   headerInfo: {
     flex: 1,
@@ -1397,40 +974,32 @@ const styles = StyleSheet.create({
 
     marginLeft: 10,
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
   },
-
 
   headerName: {
     fontSize: 15,
 
     fontWeight: "600",
 
-    color:
-      colors.textPrimary,
+    color: colors.textPrimary,
   },
-
 
   headerLocation: {
     marginTop: 2,
 
     fontSize: 11,
 
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
   },
-
 
   onlineText: {
     marginTop: 2,
 
     fontSize: 11,
 
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
   },
-
 
   headerActions: {
     flexDirection: "row",
@@ -1439,10 +1008,8 @@ const styles = StyleSheet.create({
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
   },
-
 
   callIconBtn: {
     width: 42,
@@ -1450,10 +1017,8 @@ const styles = StyleSheet.create({
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
   },
-
 
   // ==================================================
   // MESSAGES
@@ -1462,120 +1027,88 @@ const styles = StyleSheet.create({
   messagesArea: {
     flex: 1,
 
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
   },
-
 
   messagesContent: {
-    paddingHorizontal:
-      spacing.md,
+    paddingHorizontal: spacing.md,
 
-    paddingTop:
-      spacing.md,
+    paddingTop: spacing.md,
 
-    paddingBottom:
-      spacing.lg,
+    paddingBottom: spacing.lg,
   },
-
 
   emptyMessagesContent: {
     flexGrow: 1,
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
   },
-
 
   emptyContainer: {
     alignItems: "center",
 
-    paddingHorizontal:
-      spacing.xl,
+    paddingHorizontal: spacing.xl,
   },
-
 
   emptyTitle: {
     ...typography.h2,
 
-    color:
-      colors.textPrimary,
+    color: colors.textPrimary,
 
-    marginBottom:
-      spacing.xs,
+    marginBottom: spacing.xs,
   },
-
 
   emptyText: {
     ...typography.caption,
 
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
 
     textAlign: "center",
   },
 
-
   messageRow: {
     width: "100%",
 
-    marginBottom:
-      spacing.sm,
+    marginBottom: spacing.sm,
 
-    flexDirection:
-      "row",
+    flexDirection: "row",
   },
-
 
   rowSent: {
-    justifyContent:
-      "flex-end",
+    justifyContent: "flex-end",
   },
-
 
   rowReceived: {
-    justifyContent:
-      "flex-start",
+    justifyContent: "flex-start",
   },
-
 
   bubble: {
     maxWidth: "82%",
 
-    borderRadius:
-      radii.lg,
+    borderRadius: radii.lg,
 
-    paddingHorizontal:
-      spacing.md,
+    paddingHorizontal: spacing.md,
 
-    paddingTop:
-      spacing.sm,
+    paddingTop: spacing.sm,
 
-    paddingBottom:
-      spacing.xs,
+    paddingBottom: spacing.xs,
   },
 
-
   bubbleSent: {
-    backgroundColor:
-      colors.accent,
+    backgroundColor: colors.accent,
 
     borderBottomRightRadius: 5,
   },
 
-
   bubbleReceived: {
-    backgroundColor:
-      colors.surface,
+    backgroundColor: colors.surface,
 
     borderBottomLeftRadius: 5,
 
     borderWidth: 1,
 
-    borderColor:
-      colors.border,
+    borderColor: colors.border,
   },
-
 
   textSent: {
     color: colors.white,
@@ -1583,36 +1116,27 @@ const styles = StyleSheet.create({
     ...typography.body,
   },
 
-
   textReceived: {
-    color:
-      colors.textPrimary,
+    color: colors.textPrimary,
 
     ...typography.body,
   },
-
 
   messageTime: {
     fontSize: 10,
 
     marginTop: 4,
 
-    alignSelf:
-      "flex-end",
+    alignSelf: "flex-end",
   },
-
 
   messageTimeSent: {
-    color:
-      "rgba(255,255,255,0.72)",
+    color: "rgba(255,255,255,0.72)",
   },
-
 
   messageTimeReceived: {
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
   },
-
 
   // ==================================================
   // VOICE MESSAGE
@@ -1626,31 +1150,24 @@ const styles = StyleSheet.create({
     minWidth: 145,
   },
 
-
   voiceIcon: {
     width: 32,
     height: 32,
 
     borderRadius: 16,
 
-    backgroundColor:
-      colors.border,
+    backgroundColor: colors.border,
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
 
-    marginRight:
-      spacing.sm,
+    marginRight: spacing.sm,
   },
-
 
   voiceIconSent: {
-    backgroundColor:
-      "rgba(255,255,255,0.2)",
+    backgroundColor: "rgba(255,255,255,0.2)",
   },
-
 
   voiceIconText: {
     color: colors.white,
@@ -1660,13 +1177,11 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-
   voiceText: {
     flex: 1,
 
     fontWeight: "600",
   },
-
 
   // ==================================================
   // INPUT
@@ -1677,23 +1192,18 @@ const styles = StyleSheet.create({
 
     alignItems: "flex-end",
 
-    paddingHorizontal:
-      spacing.sm,
+    paddingHorizontal: spacing.sm,
 
-    paddingVertical:
-      spacing.sm,
+    paddingVertical: spacing.sm,
 
-    backgroundColor:
-      colors.background,
+    backgroundColor: colors.background,
 
     borderTopWidth: 1,
 
-    borderTopColor:
-      colors.border,
+    borderTopColor: colors.border,
 
     gap: spacing.xs,
   },
-
 
   textInput: {
     flex: 1,
@@ -1704,25 +1214,20 @@ const styles = StyleSheet.create({
 
     borderWidth: 1,
 
-    borderColor:
-      colors.border,
+    borderColor: colors.border,
 
     borderRadius: 22,
 
-    paddingHorizontal:
-      spacing.md,
+    paddingHorizontal: spacing.md,
 
     paddingVertical: 10,
 
     ...typography.body,
 
-    color:
-      colors.textPrimary,
+    color: colors.textPrimary,
 
-    backgroundColor:
-      colors.surface,
+    backgroundColor: colors.surface,
   },
-
 
   iconBtn: {
     width: 44,
@@ -1732,13 +1237,10 @@ const styles = StyleSheet.create({
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
 
-    backgroundColor:
-      colors.surface,
+    backgroundColor: colors.surface,
   },
-
 
   sendBtn: {
     width: 44,
@@ -1748,39 +1250,30 @@ const styles = StyleSheet.create({
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
 
-    backgroundColor:
-      colors.accent,
+    backgroundColor: colors.accent,
   },
-
 
   sendBtnDisabled: {
     opacity: 0.45,
   },
 
-
   cancelRecordBtn: {
     height: 44,
 
-    paddingHorizontal:
-      spacing.md,
+    paddingHorizontal: spacing.md,
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
   },
 
-
   cancelRecordText: {
-    color:
-      colors.textSecondary,
+    color: colors.textSecondary,
 
     fontWeight: "600",
   },
-
 
   stopBtn: {
     height: 44,
@@ -1789,25 +1282,20 @@ const styles = StyleSheet.create({
 
     alignItems: "center",
 
-    justifyContent:
-      "center",
+    justifyContent: "center",
 
     gap: 6,
 
-    backgroundColor:
-      colors.danger,
+    backgroundColor: colors.danger,
 
     borderRadius: 22,
 
-    paddingHorizontal:
-      spacing.md,
+    paddingHorizontal: spacing.md,
   },
-
 
   stopText: {
     color: colors.white,
 
     fontWeight: "700",
   },
-
 });
